@@ -50,6 +50,7 @@
         <div style="margin-bottom: 10px;">
             <button id="startBtn">▶ 会議開始（マイクON）</button>
             <button id="stopBtn" disabled>■ 会議終了＆議事録作成</button>
+            <button id="retryBtn" style="background-color:#0056b3;">↻ 議事録を再作成</button>
             <span id="status" style="color: #666;">待機中</span>
         </div>
         <span id="errorMsg"></span>
@@ -166,12 +167,25 @@
             statusTxt.style.color = '#dc3545';
         };
 
-        stopBtn.onclick = async () => {
+        stopBtn.onclick = () => {
             isRecording = false;
             if (recognition) recognition.stop();
             startBtn.disabled = false;
             stopBtn.disabled = true;
+            generateMinutes();
+        };
 
+        // 録音せずに、枠の中のテキストから議事録だけ作り直す
+        const retryBtn = document.getElementById('retryBtn');
+        retryBtn.onclick = () => {
+            if (isRecording) {
+                alert('録音中です。先に「会議終了＆議事録作成」を押してください。');
+                return;
+            }
+            generateMinutes();
+        };
+
+        async function generateMinutes() {
             const format = document.getElementById('formatInput').value;
             const textToProcess = transcriptBox.innerText;
 
@@ -182,8 +196,9 @@
                 return;
             }
 
-            statusTxt.textContent = '⏳ AIが議事録を作成中...';
+            statusTxt.textContent = '⏳ AIが議事録を作成中...（混雑時は1分ほどかかります）';
             statusTxt.style.color = '#0056b3';
+            retryBtn.disabled = true;
 
             try {
                 const result = await callGas({ action: 'process', transcript: textToProcess, format: format });
@@ -200,8 +215,10 @@
                 resultBox.textContent = '通信エラー: ' + error.message;
                 statusTxt.textContent = '通信エラー';
                 statusTxt.style.color = 'red';
+            } finally {
+                retryBtn.disabled = false;
             }
-        };
+        }
     </script>
 </body>
 </html>
