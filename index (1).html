@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>営業部・調達課 会議議事録ジェネレーター</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 900px; margin: auto; background-color: #f4f7f6; }
+        h2 { font-size: 18px; border-bottom: 2px solid #0056b3; padding-bottom: 5px; color: #333; }
+        .section { background: #fff; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        textarea { width: 100%; margin-bottom: 10px; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; font-size: 14px; }
+        .box { border: 1px solid #ccc; padding: 15px; height: 200px; overflow-y: auto; background: #fff; border-radius: 4px; line-height: 1.6; font-size: 14px; }
+        .box:focus { outline: 2px solid #0056b3; }
+        button { padding: 12px 24px; font-size: 16px; font-weight: bold; cursor: pointer; border: none; border-radius: 4px; margin-right: 10px; color: #fff; }
+        #startBtn { background-color: #28a745; }
+        #startBtn:disabled { background-color: #94d3a2; cursor: not-allowed; }
+        #stopBtn { background-color: #dc3545; }
+        #stopBtn:disabled { background-color: #e4949b; cursor: not-allowed; }
+        #testBtn { background-color: #17a2b8; padding: 8px 16px; font-size: 14px; margin-bottom: 10px; }
+        #status { font-weight: bold; font-size: 16px; margin-left: 10px; }
+        .interim { color: #888; font-style: italic; }
+        #errorMsg { color: red; font-size: 14px; margin-top: 5px; display: block; }
+    </style>
+</head>
+<body>
+
+    <div class="section">
+        <h2>1. 事前チェック＆フォーマット</h2>
+        <div style="background-color: #e9ecef; padding: 10px; border-radius: 5px; margin-bottom: 15px;">
+            <button id="testBtn">🔄 AI接続テスト</button>
+            <span id="testStatus" style="font-size: 14px; margin-left: 10px; color: #555;">AIサーバーが混雑していないか確認できます。</span>
+        </div>
+        <textarea id="formatInput" style="height: 150px;">
+営業部・調達課会議議事録（〇月）
+
+１．伝達事項
+・
+・
+
+２．業務報告
+（各担当者の発言内容から抽出。氏名（役職） 顧客名／案件名：進捗状況 の形式で記載）
+
+次回予定：
+作成日・作成者：
+        </textarea>
+    </div>
+
+    <div class="section">
+        <h2>2. 会議の録音・文字起こし</h2>
+        <div style="margin-bottom: 10px;">
+            <button id="startBtn">▶ 会議開始（マイクON）</button>
+            <button id="stopBtn" disabled>■ 会議終了＆議事録作成</button>
+            <span id="status" style="color: #666;">待機中</span>
+        </div>
+        <span id="errorMsg"></span>
+        <div id="transcriptBox" class="box" contenteditable="true"></div>
+    </div>
+
+    <div class="section">
+        <h2>3. 完成した議事録</h2>
+        <div id="resultBox" class="box" style="height: 300px; white-space: pre-wrap; border-color: #0056b3; background-color: #fafafa;" contenteditable="false">
+ここに自動生成された議事録が表示されます...
+        </div>
+    </div>
+
+    <script>
+        // ★GASをウェブアプリとしてデプロイしたURL（.../exec）を貼り付けてください
+        const GAS_URL = 'https://script.google.com/macros/s/AKfycbxE2z7tCep2GXJ8dBL9REIl_AwXgjQtEuw_vIRuk-WLhe7JySVwiJoZtY5OxnLzTwoA/exec';
+        // ★Code.gs の ACCESS_TOKEN と同じ合言葉
+        const ACCESS_TOKEN = 'kotobuki';
+
+        // google.script.run の代わりに GAS へ POST する関数
+        // Content-Type を text/plain にするのは、CORS の事前確認（preflight）を避けるため
+        async function callGas(data) {
+            const res = await fetch(GAS_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                body: JSON.stringify(Object.assign({ token: ACCESS_TOKEN }, data))
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json();
+        }
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusTxt = document.getElementById('status');
+        const errorMsg = document.getElementById('errorMsg');
+        const transcriptBox = document.getElementById('transcriptBox');
+        const resultBox = document.getElementById('resultBox');
+        const testBtn = document.getElementById('testBtn');
+        const testStatus = document.getElementById('testStatus');
+
+        testBtn.onclick = async () => {
+            testBtn.disabled = true;
+            testStatus.textContent = '⏳ テスト通信中...';
+            testStatus.style.color = '#0056b3';
+            try {
+                const result = await callGas({ action: 'test' });
+                const msg = result.message || result.error;
+                testStatus.textContent = result.success ? '✅ ' + msg : '❌ ' + msg;
+                testStatus.style.color = result.success ? '#28a745' : '#dc3545';
+            } catch (error) {
+                testStatus.textContent = '❌ 通信失敗: ' + error.message;
+                testStatus.style.color = '#dc3545';
+            } finally {
+                testBtn.disabled = false;
+            }
+        };
+
+        let recognition;
+        let isRecording = false;
+        let finalTranscript = '';
+
+        if ('webkitSpeechRecognition' in window) {
+            recognition = new webkitSpeechRecognition();
+            recognition.lang = 'ja-JP';
+            recognition.continuous = true;
+            recognition.interimResults = true;
+
+            recognition.onresult = (event) => {
+                let interimTranscript = '';
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript + '。\n';
+                    } else {
+                        interimTranscript += event.results[i][0].transcript;
+                    }
+                }
+                transcriptBox.innerHTML = finalTranscript.replace(/\n/g, '<br>') + '<span class="interim">' + interimTranscript + '</span>';
+                transcriptBox.scrollTop = transcriptBox.scrollHeight;
+                errorMsg.textContent = '';
+            };
+
+            recognition.onerror = (event) => {
+                console.error('Speech Recognition Error:', event.error);
+                let errorDetails = '音声認識エラー: ';
+                if (event.error === 'network') {
+                    errorDetails += '会社のネットワーク（ファイアウォール）でブロックされている可能性があります。';
+                } else if (event.error === 'not-allowed') {
+                    errorDetails += 'マイクが許可されていないか、他のアプリがマイクを占有しています。';
+                } else if (event.error === 'no-speech') {
+                    errorDetails += '音声が検出されませんでした。マイクの設定や音量を確認してください。';
+                } else {
+                    errorDetails += event.error;
+                }
+                errorMsg.textContent = errorDetails;
+            };
+
+            recognition.onend = () => {
+                if (isRecording) {
+                    try { recognition.start(); } catch (e) {}
+                }
+            };
+        } else {
+            errorMsg.textContent = 'お使いのブラウザは音声認識に対応していません。Google Chromeをご利用ください。';
+        }
+
+        startBtn.onclick = () => {
+            if (!recognition) return;
+            isRecording = true;
+            errorMsg.textContent = '';
+            try { recognition.start(); } catch (e) {}
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            statusTxt.textContent = '● 録音中...';
+            statusTxt.style.color = '#dc3545';
+        };
+
+        stopBtn.onclick = async () => {
+            isRecording = false;
+            if (recognition) recognition.stop();
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+
+            const format = document.getElementById('formatInput').value;
+            const textToProcess = transcriptBox.innerText;
+
+            if (!textToProcess.trim()) {
+                alert('文字起こしテキストがありません！');
+                statusTxt.textContent = '待機中';
+                statusTxt.style.color = '#666';
+                return;
+            }
+
+            statusTxt.textContent = '⏳ AIが議事録を作成中...';
+            statusTxt.style.color = '#0056b3';
+
+            try {
+                const result = await callGas({ action: 'process', transcript: textToProcess, format: format });
+                if (result.success) {
+                    resultBox.textContent = result.summary;
+                    statusTxt.textContent = '完了！';
+                    statusTxt.style.color = '#28a745';
+                } else {
+                    resultBox.textContent = 'エラー: ' + result.error;
+                    statusTxt.textContent = 'エラー発生';
+                    statusTxt.style.color = 'red';
+                }
+            } catch (error) {
+                resultBox.textContent = '通信エラー: ' + error.message;
+                statusTxt.textContent = '通信エラー';
+                statusTxt.style.color = 'red';
+            }
+        };
+    </script>
+</body>
+</html>
