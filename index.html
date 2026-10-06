@@ -12,14 +12,28 @@
         .box { border: 1px solid #ccc; padding: 15px; height: 200px; overflow-y: auto; background: #fff; border-radius: 4px; line-height: 1.6; font-size: 14px; }
         .box:focus { outline: 2px solid #0056b3; }
         button { padding: 12px 24px; font-size: 16px; font-weight: bold; cursor: pointer; border: none; border-radius: 4px; margin-right: 10px; color: #fff; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
         #startBtn { background-color: #28a745; }
-        #startBtn:disabled { background-color: #94d3a2; cursor: not-allowed; }
         #stopBtn { background-color: #dc3545; }
-        #stopBtn:disabled { background-color: #e4949b; cursor: not-allowed; }
+        #retryBtn { background-color: #0056b3; }
         #testBtn { background-color: #17a2b8; padding: 8px 16px; font-size: 14px; margin-bottom: 10px; }
         #status { font-weight: bold; font-size: 16px; margin-left: 10px; }
         .interim { color: #888; font-style: italic; }
+        .tag { color: #0056b3; font-weight: bold; }
         #errorMsg { color: red; font-size: 14px; margin-top: 5px; display: block; }
+
+        /* 発言者ボタン */
+        .speakerLabel { font-size: 13px; color: #666; margin-bottom: 6px; }
+        #speakers { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+        .speaker { background: #fff; color: #333; border: 2px solid #ccc; border-radius: 999px; padding: 8px 18px; font-size: 15px; margin: 0; }
+        .speaker.on { background: #0056b3; color: #fff; border-color: #0056b3; }
+
+        /* 一時保存 */
+        #restoreBar { display: none; background: #fff3cd; color: #664d03; border: 1px solid #ffe69c; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; font-size: 14px; }
+        #restoreBar button { padding: 6px 14px; font-size: 14px; margin: 6px 8px 0 0; }
+        #restoreYes { background: #664d03; }
+        #restoreNo { background: #999; }
+        #savedInfo { font-size: 12px; color: #999; text-align: right; margin-top: 4px; }
     </style>
 </head>
 <body>
@@ -47,14 +61,25 @@
 
     <div class="section">
         <h2>2. 会議の録音・文字起こし</h2>
+
+        <div id="restoreBar">
+            💾 前回の文字起こし（<span id="restoreTime"></span> 自動保存）が残っています。復元しますか？<br>
+            <button id="restoreYes">復元する</button>
+            <button id="restoreNo">破棄して新しく始める</button>
+        </div>
+
+        <div class="speakerLabel">話している人（報告の順番が来たら押してください）</div>
+        <div id="speakers"><span style="font-size:13px;color:#999;">メンバーを読み込み中...</span></div>
+
         <div style="margin-bottom: 10px;">
             <button id="startBtn">▶ 会議開始（マイクON）</button>
             <button id="stopBtn" disabled>■ 会議終了＆議事録作成</button>
-            <button id="retryBtn" style="background-color:#0056b3;">↻ 議事録を再作成</button>
+            <button id="retryBtn">↻ 議事録を再作成</button>
             <span id="status" style="color: #666;">待機中</span>
         </div>
         <span id="errorMsg"></span>
         <div id="transcriptBox" class="box" contenteditable="true"></div>
+        <div id="savedInfo">自動保存：まだありません</div>
     </div>
 
     <div class="section">
@@ -65,13 +90,14 @@
     </div>
 
     <script>
-        // ★GASをウェブアプリとしてデプロイしたURL（.../exec）を貼り付けてください
+        // ★GASをウェブアプリとしてデプロイしたURL（.../exec）
         const GAS_URL = 'https://script.google.com/macros/s/AKfycbzX7h4wqQ9SIpr_ZrThBuTL99pWtbI0lmBUkbIEW1uyPD9bRWhFFLfB9QS1DJggyKHK/exec';
         // ★Code.gs の ACCESS_TOKEN と同じ合言葉
         const ACCESS_TOKEN = 'kotobuki';
 
-        // google.script.run の代わりに GAS へ POST する関数
-        // Content-Type を text/plain にするのは、CORS の事前確認（preflight）を避けるため
+        // 一時保存の保存先（このPCのこのブラウザの中だけに保存されます）
+        const SAVE_KEY = 'gijiroku_autosave';
+
         async function callGas(data) {
             const res = await fetch(GAS_URL, {
                 method: 'POST',
@@ -84,13 +110,118 @@
 
         const startBtn = document.getElementById('startBtn');
         const stopBtn = document.getElementById('stopBtn');
+        const retryBtn = document.getElementById('retryBtn');
         const statusTxt = document.getElementById('status');
         const errorMsg = document.getElementById('errorMsg');
         const transcriptBox = document.getElementById('transcriptBox');
         const resultBox = document.getElementById('resultBox');
         const testBtn = document.getElementById('testBtn');
         const testStatus = document.getElementById('testStatus');
+        const speakersDiv = document.getElementById('speakers');
+        const savedInfo = document.getElementById('savedInfo');
 
+        let finalTranscript = '';   // 確定した文字起こし（【名前】付き）
+        let currentSpeaker = '';    // 今選ばれている発言者
+        let lastTaggedSpeaker = ''; // 最後に【名前】を付けた発言者
+
+        function escapeHtml(s) {
+            return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        // 文字起こし枠を描画（【名前】は青字に）
+        function render(interim) {
+            const html = escapeHtml(finalTranscript)
+                .replace(/【([^】]+)】/g, '<span class="tag">【$1】</span>')
+                .replace(/\n/g, '<br>');
+            transcriptBox.innerHTML = html + (interim ? '<span class="interim">' + escapeHtml(interim) + '</span>' : '');
+            transcriptBox.scrollTop = transcriptBox.scrollHeight;
+        }
+
+        // ---------- 発言者ボタン ----------
+        function buildSpeakerButtons(names) {
+            const list = names.concat(['全体']);
+            speakersDiv.innerHTML = '';
+            list.forEach(name => {
+                const b = document.createElement('button');
+                b.className = 'speaker';
+                b.textContent = name;
+                b.onclick = () => selectSpeaker(name);
+                speakersDiv.appendChild(b);
+            });
+            selectSpeaker(list[0]);
+        }
+
+        function selectSpeaker(name) {
+            currentSpeaker = name;
+            [...speakersDiv.children].forEach(b => b.classList.toggle('on', b.textContent === name));
+        }
+
+        async function loadMembers() {
+            try {
+                const r = await callGas({ action: 'getMembers' });
+                buildSpeakerButtons(r.success && r.members ? r.members : []);
+            } catch (e) {
+                buildSpeakerButtons([]);
+                errorMsg.textContent = 'メンバーの読み込みに失敗しました（「全体」のみで使えます）: ' + e.message;
+            }
+        }
+
+        // ---------- 一時保存 ----------
+        function nowLabel(d) {
+            return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0');
+        }
+
+        let doneText = null; // 議事録作成済み（スプシ保存済み）の文字起こし
+
+        function saveNow() {
+            try {
+                if (!finalTranscript.trim()) return;
+                if (finalTranscript === doneText) return; // 保存済みの内容は一時保存しない
+                const d = new Date();
+                localStorage.setItem(SAVE_KEY, JSON.stringify({ text: finalTranscript, time: d.getTime() }));
+                savedInfo.textContent = '自動保存：' + nowLabel(d) + ':' + String(d.getSeconds()).padStart(2, '0');
+            } catch (e) {}
+        }
+
+        function clearSaved() {
+            try { localStorage.removeItem(SAVE_KEY); } catch (e) {}
+            savedInfo.textContent = '自動保存：まだありません';
+        }
+
+        function checkSaved() {
+            try {
+                const saved = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
+                if (!saved || !saved.text || !saved.text.trim()) return;
+                document.getElementById('restoreTime').textContent = nowLabel(new Date(saved.time));
+                const bar = document.getElementById('restoreBar');
+                bar.style.display = 'block';
+                document.getElementById('restoreYes').onclick = () => {
+                    finalTranscript = saved.text;
+                    const tags = finalTranscript.match(/【([^】]+)】/g);
+                    lastTaggedSpeaker = tags ? tags[tags.length - 1].slice(1, -1) : '';
+                    render('');
+                    bar.style.display = 'none';
+                };
+                document.getElementById('restoreNo').onclick = () => {
+                    clearSaved();
+                    bar.style.display = 'none';
+                };
+            } catch (e) {}
+        }
+
+        // 5秒ごとに自動保存
+        setInterval(saveNow, 5000);
+        // ページを閉じる直前にも保存
+        window.addEventListener('beforeunload', saveNow);
+
+        // 枠を手で直したら、その内容を正として保存
+        transcriptBox.addEventListener('input', () => {
+            finalTranscript = transcriptBox.innerText.replace(/\n{3,}/g, '\n\n');
+            if (finalTranscript && !finalTranscript.endsWith('\n')) finalTranscript += '\n';
+            saveNow();
+        });
+
+        // ---------- 接続テスト ----------
         testBtn.onclick = async () => {
             testBtn.disabled = true;
             testStatus.textContent = '⏳ テスト通信中...';
@@ -108,9 +239,9 @@
             }
         };
 
+        // ---------- 音声認識 ----------
         let recognition;
         let isRecording = false;
-        let finalTranscript = '';
 
         if ('webkitSpeechRecognition' in window) {
             recognition = new webkitSpeechRecognition();
@@ -121,14 +252,20 @@
             recognition.onresult = (event) => {
                 let interimTranscript = '';
                 for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const text = event.results[i][0].transcript;
                     if (event.results[i].isFinal) {
-                        finalTranscript += event.results[i][0].transcript + '。\n';
+                        // 発言者が変わったら【名前】を付けて改行
+                        if (currentSpeaker && currentSpeaker !== lastTaggedSpeaker) {
+                            if (finalTranscript && !finalTranscript.endsWith('\n')) finalTranscript += '\n';
+                            finalTranscript += '【' + currentSpeaker + '】';
+                            lastTaggedSpeaker = currentSpeaker;
+                        }
+                        finalTranscript += text + '。\n';
                     } else {
-                        interimTranscript += event.results[i][0].transcript;
+                        interimTranscript += text;
                     }
                 }
-                transcriptBox.innerHTML = finalTranscript.replace(/\n/g, '<br>') + '<span class="interim">' + interimTranscript + '</span>';
-                transcriptBox.scrollTop = transcriptBox.scrollHeight;
+                render(interimTranscript);
                 errorMsg.textContent = '';
             };
 
@@ -158,6 +295,7 @@
 
         startBtn.onclick = () => {
             if (!recognition) return;
+            document.getElementById('restoreBar').style.display = 'none';
             isRecording = true;
             errorMsg.textContent = '';
             try { recognition.start(); } catch (e) {}
@@ -172,11 +310,10 @@
             if (recognition) recognition.stop();
             startBtn.disabled = false;
             stopBtn.disabled = true;
+            saveNow();
             generateMinutes();
         };
 
-        // 録音せずに、枠の中のテキストから議事録だけ作り直す
-        const retryBtn = document.getElementById('retryBtn');
         retryBtn.onclick = () => {
             if (isRecording) {
                 alert('録音中です。先に「会議終了＆議事録作成」を押してください。');
@@ -204,8 +341,11 @@
                 const result = await callGas({ action: 'process', transcript: textToProcess, format: format });
                 if (result.success) {
                     resultBox.textContent = result.summary;
-                    statusTxt.textContent = '完了！';
+                    statusTxt.textContent = '完了！（スプレッドシートに保存しました）';
                     statusTxt.style.color = '#28a745';
+                    // スプシに保存できたので、一時保存は消す
+                    doneText = finalTranscript;
+                    clearSaved();
                 } else {
                     resultBox.textContent = 'エラー: ' + result.error;
                     statusTxt.textContent = 'エラー発生';
@@ -219,6 +359,10 @@
                 retryBtn.disabled = false;
             }
         }
+
+        // ページを開いたとき
+        checkSaved();
+        loadMembers();
     </script>
 </body>
 </html>
